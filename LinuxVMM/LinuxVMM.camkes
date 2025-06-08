@@ -42,6 +42,28 @@ component LinuxVMM {
     attribute String passthrough_nic_bar0_size_config = "0x20000";    // Expected BAR0 size (128KB)
     attribute String passthrough_nic_assigned_irq = "5";             // Physical IRQ assigned to this device by host
 
+    // PCI Passthrough for GPU (Example: Nvidia GTX 970)
+    attribute String passthrough_gpu_vid = "0x10DE";      // Nvidia Vendor ID
+    attribute String passthrough_gpu_did = "0x13C2";      // Nvidia GTX 970 Device ID
+    attribute String passthrough_gpu_bar0_paddr_expected = "0xc0000000"; // Example expected physical address for GPU BAR0 (MMIO)
+    attribute String passthrough_gpu_bar0_size_config = "0x1000000";   // Example size for GPU BAR0 (16MB)
+    attribute String passthrough_gpu_bar1_paddr_expected = "0xd0000000"; // Example expected physical address for GPU BAR1 (Framebuffer)
+    attribute String passthrough_gpu_bar1_size_config = "0x10000000";  // Example size for GPU BAR1 (256MB)
+    attribute String passthrough_gpu_bar3_paddr_expected = "0xd8000000"; // Example expected physical address for GPU BAR3 (MMIO)
+    attribute String passthrough_gpu_bar3_size_config = "0x2000000";   // Example size for GPU BAR3 (32MB)
+    attribute String passthrough_gpu_assigned_irq = "11";            // Example physical IRQ for GPU
+    attribute String gpu_vbios_image_name = "vbios.rom";             // Filename for the VBIOS image
+
+    // VirtIO Block Device Configuration (for Windows guest disk)
+    attribute String virtio_blk_mmio_paddr = "0x48001000"; // Example guest physical address (e.g., next to virtio-console)
+    attribute String virtio_blk_mmio_size = "0x1000";     // 4KB MMIO region size
+    attribute String virtio_blk_irq = "12";               // Example guest IRQ number for VirtIO block
+    attribute String windows_disk_image_name = "windows.img"; // Symbolic name for the disk image
+    attribute String windows_disk_image_size_config = "0x400000000"; // Example size: 16GB
+
+    // Guest OS Type Configuration
+    attribute String is_windows_guest = "false"; // Set to "true" for a Windows guest to trigger specific logic
+
 
     // --- Interfaces ---
     // For VMM's own debug output and potentially guest TTY later
@@ -75,6 +97,18 @@ component LinuxVMM {
     // The actual physical IRQ number is configured in the .camkes app assembly,
     // and the CAmkES infrastructure routes it to this event.
     consumes IRQ passthrough_nic_irq_event;
+
+    // GPU Passthrough Resources
+    dataport Buf(0x1000000) passthrough_gpu_bar0_mem R=1, W=1;  // Corresponds to passthrough_gpu_bar0_size_config (16MB)
+    dataport Buf(0x10000000) passthrough_gpu_bar1_mem R=1, W=1; // Corresponds to passthrough_gpu_bar1_size_config (256MB)
+    dataport Buf(0x2000000) passthrough_gpu_bar3_mem R=1, W=1;  // Corresponds to passthrough_gpu_bar3_size_config (32MB)
+    dataport Buf(0x80000) gpu_vbios_image_dataport;             // 512KB for VBIOS image (typical max size)
+    consumes IRQ passthrough_gpu_irq_event;
+
+    // VirtIO Block Device Resources
+    // The size here should match 'windows_disk_image_size_config'.
+    // This dataport will be mapped to the actual disk image content by the build system.
+    dataport Buf(0x400000000) windows_disk_image_dataport; // 16GB example size
 
 
     // --- Composition Notes (for application assembler) ---
