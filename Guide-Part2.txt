@@ -1,0 +1,352 @@
+Developer's Guide: Building the Skyscope Micro Kernel Hypervisor [seL4 Post-Quantum Hypervisor - multi platform paravirtualization concept]
+Introduction:
+
+This guide provides a practical, code-centric walkthrough for building the secure seL4 hypervisor outlined in the preceding research document. It focuses on concrete commands, code snippets, and configuration examples necessary to compile the system from source. All components are sourced from public GitHub repositories.
+
+Disclaimer: This project is highly advanced. The steps for hardware passthrough and multi-OS support are complex and require significant adaptation for your specific hardware and software targets. Begin by following these steps in a simulated QEMU environment before attempting to run on physical hardware.
+
+Section 1: Environment Setup & Source Acquisition
+First, we prepare a Linux host (Ubuntu 22.04 LTS recommended) and fetch all necessary source code.
+
+1.1. Install Host Dependencies
+
+# Update package lists
+sudo apt-get update
+
+# Install essential build tools, QEMU for simulation, and Python
+sudo apt-get install -y build-essential gcc g++ git cmake ninja-build python3 python3-pip qemu-system-x86 libxml2-utils
+
+# Install Google Repo tool for managing seL4 projects
+sudo apt-get install -y repo
+
+# Install dependencies for CAmkES
+sudo apt-get install -y haskell-stack libarchive-dev libpcre3-dev
+
+# Install dependencies for creating the bootable ISO
+sudo apt-get install -y grub-pc-bin xorriso
+
+1.2. Fetch seL4 VMM Source Code
+
+We will use the camkes-vm-examples manifest as our project's foundation. It includes the seL4 kernel, CAmkES, VMM libraries, and example applications.
+
+# Create a project directory
+mkdir -p ~/sel4-hypervisor
+cd ~/sel4-hypervisor
+
+# Initialize repo with the CAmkES VM examples manifest
+# Source: https://github.com/seL4/camkes-vm-examples-manifest
+repo init -u https://github.com/seL4/camkes-vm-examples-manifest.git
+
+# Synchronize all repositories defined in the manifest
+repo sync
+
+This will download numerous repositories into the projects/ directory, including seL4/seL4, seL4/camkes-tool, seL4/seL4_projects_libs, and seL4/camkes-vm.
+
+Section 2: Initial Build and Simulation
+Let's compile a minimal Linux VM example to verify the toolchain and environment are correctly set up.
+
+2.1. Configure and Build the CAmkES VM
+
+# Navigate to the CAmkES VM examples directory
+cd projects/camkes/vm/camkes-vm-examples
+
+# Create a build directory
+mkdir build
+cd build
+
+# Initialize the build for an x86_64 PC target, for simulation
+../init-build.sh -DCAMKES_VM_APP=vm_minimal -DPLATFORM=pc99 -DSIMULATION=1
+
+# Compile the entire system using ninja
+ninja
+
+A successful build will place the final bootable images in images/. The key artifacts are:
+
+kernel-x86_64-pc99.elf: The seL4 kernel.
+
+capdl-loader-image-x86_64-pc99: The application loader containing the CAmkES VMM and the guest Linux image, which GRUB will load as a module.
+
+2.2. Test the Build in QEMU
+
+The build process generates a simulation script.
+
+# From within the 'build' directory
+./simulate
+
+You should see QEMU start, boot seL4, and then launch a minimal Linux guest, eventually dropping you at a buildroot login: prompt. This confirms the base system works. Press Ctrl+A, then X to exit QEMU.
+
+Section 3: Integrating Post-Quantum Cryptography
+Here, we'll add a PQ crypto library to the project and create a CAmkES component to use it. We'll use liboqs from the Open-Quantum-Safe project.
+
+3.1. Add liboqs as a Git Submodule
+
+# Navigate to the top-level project directory
+cd ~/sel4-hypervisor
+
+# Add liboqs as a submodule
+# Source: https://github.com/open-quantum-safe/liboqs
+git submodule add https://github.com/open-quantum-safe/liboqs.git
+git submodule update --init --recursive
+
+3.2. Integrate liboqs into the CAmkES Build
+
+This requires modifying CMake files. We'll create a hypothetical CAmkES component (pq_crypto_manager) that uses liboqs to sign a message.
+
+Modify the top-level CMakeLists.txt (projects/camkes/vm/camkes-vm-examples/CMakeLists.txt) to include the liboqs subdirectory:
+
+# ... existing CMake content ...
+
+# Add the liboqs subdirectory to the build
+# OQS_DIST_BUILD=ON prevents it from trying to install itself
+add_subdirectory(../../../../liboqs EXCLUDE_FROM_ALL)
+set(OQS_DIST_BUILD ON CACHE BOOL "Build for distribution" FORCE)
+
+# ... rest of the file ...
+
+Modify the CAmkES component's CMakeLists.txt to link against liboqs. Assume we have a component at projects/camkes/vm/camkes-vm-examples/apps/my_secure_vm/components/pq_crypto_manager/CMakeLists.txt:
+
+# ... existing component setup ...
+
+# Link the CAmkES component against the liboqs library
+target_link_libraries(pq_crypto_manager PRIVATE oqs)
+
+3.3. Example PQ Crypto CAmkES Component (pq_crypto_manager.c)
+
+This C code snippet shows how you would call liboqs from within your component's run loop.
+
+#include <stdio.h>
+#include <camkes.h>
+#include <oqs/oqs.h> // Include the liboqs header
+
+void pq_signer__run(void) {
+    // Example: Sign a message using ML-DSA (Dilithium)
+    // NOTE: This is a simplified example. Proper error handling,
+    // memory management, and key management are essential in a real system.
+
+    OQS_SIG *sig = NULL;
+    uint8_t *public_key = NULL;
+    uint8_t *secret_key = NULL;
+    uint8_t *message = (uint8_t *)"This is the message to sign.";
+    size_t message_len = strlen((char *)message);
+    uint8_t *signature = NULL;
+    size_t signature_len;
+
+    // Use ML-DSA-65, a NIST standardized algorithm
+    const char *sig_alg = "ML-DSA-65";
+
+    sig = OQS_SIG_new(sig_alg);
+    if (sig == NULL) {
+        printf("PQ_CRYPTO: Failed to create signature object for %s\n", sig_alg);
+        return;
+    }
+
+    public_key = malloc(sig->length_public_key);
+    secret_key = malloc(sig->length_secret_key);
+    signature = malloc(sig->length_signature);
+
+    if (!public_key || !secret_key || !signature) {
+        printf("PQ_CRYPTO: Malloc failed.\n");
+        goto cleanup;
+    }
+
+    // Generate a keypair
+    if (OQS_SIG_keypair(sig, public_key, secret_key) != OQS_SUCCESS) {
+        printf("PQ_CRYPTO: Keypair generation failed.\n");
+        goto cleanup;
+    }
+
+    // Sign the message
+    if (OQS_SIG_sign(sig, signature, &signature_len, message, message_len, secret_key) != OQS_SUCCESS) {
+        printf("PQ_CRYPTO: Message signing failed.\n");
+        goto cleanup;
+    }
+
+    printf("PQ_CRYPTO: Successfully signed message! Signature length: %zu\n", signature_len);
+
+    // Verify the signature
+    if (OQS_SIG_verify(sig, message, message_len, signature, signature_len, public_key) == OQS_SUCCESS) {
+        printf("PQ_CRYPTO: Signature verification successful!\n");
+    } else {
+        printf("PQ_CRYPTO: Signature verification failed!\n");
+    }
+
+cleanup:
+    // In a real component, keys would be stored/managed, not freed immediately.
+    if (public_key) free(public_key);
+    if (secret_key) free(secret_key);
+    if (signature) free(signature);
+    OQS_SIG_free(sig);
+}
+
+Section 4: Configuring GPU Passthrough (Nvidia GTX 970)
+This section is highly specific to your hardware and requires manual configuration.
+
+4.1. Identify GPU Hardware Details on Host
+
+Boot a standard Linux distribution on the target machine and run these commands.
+
+# Find the GPU's PCI bus ID, Vendor:Device ID, and IOMMU group
+lspci -nnk | grep -i "NVIDIA"
+
+# Example Output:
+# 01:00.0 VGA compatible controller [0300]: NVIDIA Corporation GM204 [GeForce GTX 970] [10de:13c2] (rev a1)
+# 01:00.1 Audio device [0403]: NVIDIA Corporation GM204 High Definition Audio Controller [10de:0fba] (rev a1)
+
+# Find MMIO BAR addresses and sizes for the GPU (e.g., for 01:00.0)
+lspci -v -s 01:00.0
+
+# Example Output (abbreviated):
+# Region 0: Memory at f6000000 (32-bit, non-prefetchable) [size=16M]
+# Region 1: Memory at e0000000 (64-bit, prefetchable) [size=256M]
+# Region 3: Memory at f0000000 (64-bit, prefetchable) [size=32M]
+# Expansion ROM at f7000000 [disabled] [size=512K]
+
+# Find the IRQ used by the GPU
+cat /proc/interrupts | grep `lspci -s 01:00.0 -n | cut -d ':' -f 3`
+
+# Note: This is a simplification. Modern systems use MSI/MSI-X, which is more complex.
+# The VMM libraries provide helpers for MSI, but initial setup may use legacy IRQs.
+
+4.2. Configure CAmkES VM for Passthrough
+
+You must manually add this information to your VM's configuration file (e.g., projects/camkes/vm/camkes-vm-examples/apps/my_secure_vm/my_secure_vm.camkes).
+
+// In the 'configuration' section for your VM component (e.g., vm0)
+configuration {
+    // ... other vm settings like ram, vcpus, kernel image ...
+
+    // Configure PCI passthrough devices
+    vm0.pci_devices = [
+        // --- NVIDIA GeForce GTX 970 ---
+        {
+            "bus": 1, "dev": 0, "fun": 0, // PCI ID: 01:00.0
+            "vendor_id": 0x10de, "device_id": 0x13c2,
+            "memory": [
+                // BAR 0: 16MB at 0xf6000000
+                {"paddr": 0xf6000000, "size": 0x1000000, "page_bits": 21},
+                // BAR 1: 256MB at 0xe0000000
+                {"paddr": 0xe0000000, "size": 0x10000000, "page_bits": 21},
+                // BAR 3: 32MB at 0xf0000000
+                {"paddr": 0xf0000000, "size": 0x2000000, "page_bits": 21},
+                // Expansion ROM: 512KB at 0xf7000000 (if needed)
+                {"paddr": 0xf7000000, "size": 0x80000, "page_bits": 12}
+            ]
+        },
+        // --- NVIDIA HD Audio (if in the same IOMMU group) ---
+        {
+            "bus": 1, "dev": 0, "fun": 1, // PCI ID: 01:00.1
+            "vendor_id": 0x10de, "device_id": 0x0fba,
+            "memory": [
+                // BAR 0 for audio device
+                {"paddr": 0xf7080000, "size": 0x4000, "page_bits": 12}
+            ]
+        }
+    ];
+
+    // Configure IRQ mapping (this is highly system-dependent)
+    vm0.irqs = [
+        // Map host IRQ 16 to guest GSI 16 for the GPU.
+        // The actual source IRQ must be determined from your hardware.
+        {"source": 16, "dest": 16}
+    ];
+
+    // Path to the VBIOS ROM file, to be loaded as a multiboot module
+    vm0.rom_file = "GTX970.rom";
+}
+
+Section 5: Final Assembly - Master Build Script & ISO Generation
+This master script automates the creation of the bootable ISO.
+
+5.1. grub.cfg for Booting seL4
+
+Create this file as iso_build/boot/grub/grub.cfg.
+
+set timeout=10
+set default="sel4_hypervisor"
+
+menuentry "seL4 Secure Hypervisor" --id "sel4_hypervisor" {
+    echo "Loading seL4 Kernel..."
+    # The 'ro' flag is a hint for immutability, though seL4 enforces this
+    multiboot2 /boot/kernel.elf ro
+
+    echo "Loading VMM Payload..."
+    # The capdl-loader contains the entire CAmkES system
+    module2 /boot/payload.elf VMM_Payload
+
+    echo "Loading GPU VBIOS (if configured)..."
+    # Load the VBIOS for GPU passthrough
+    module2 /boot/GTX970.rom VBIOS_ROM
+
+    echo "Booting..."
+    boot
+}
+
+# --- Conceptual Script for Auto-Detecting other OS Installers ---
+# This part is complex and requires extensive scripting.
+# It would pass installer info to the VMM, not boot them directly.
+
+submenu "Boot External OS Installer (via VMM)" {
+    # Search for a Windows installer ISO on any device
+    if search --file --no-floppy --set=root /sources/install.wim; then
+        menuentry "Launch Windows Installer in VM" {
+            # This doesn't boot Windows. It reboots into seL4,
+            # passing the installer location as a kernel command-line arg.
+            multiboot2 /boot/kernel.elf ro vmm.guest.0.installer_disk_uuid=${root}
+            module2 /boot/payload.elf VMM_Payload
+            boot
+        }
+    fi
+}
+
+5.2. Master build_iso.sh Script
+
+Save this script as build_iso.sh in your project's root (~/sel4-hypervisor).
+
+#!/bin/bash
+set -e
+
+# --- Configuration ---
+BUILD_DIR=~/sel4-hypervisor/projects/camkes/vm/camkes-vm-examples/build
+ISO_DIR=~/sel4-hypervisor/iso_build
+ISO_NAME="sel4_hypervisor.iso"
+
+# --- 1. Clean and Create ISO Directory Structure ---
+echo "--- Preparing ISO directory ---"
+rm -rf "$ISO_DIR"
+mkdir -p "$ISO_DIR/boot/grub"
+
+# --- 2. Copy Built Artifacts ---
+echo "--- Copying seL4 and VMM artifacts ---"
+cp "$BUILD_DIR/images/kernel-x86_64-pc99.elf" "$ISO_DIR/boot/kernel.elf"
+cp "$BUILD_DIR/images/capdl-loader-image-x86_64-pc99" "$ISO_DIR/boot/payload.elf"
+
+# --- 3. Copy GRUB Configuration and VBIOS ---
+echo "--- Copying GRUB config and VBIOS ---"
+cp grub.cfg "$ISO_DIR/boot/grub/grub.cfg"
+# Make sure your VBIOS file is available at the project root
+if [ -f "GTX970.rom" ]; then
+    cp GTX970.rom "$ISO_DIR/boot/GTX970.rom"
+else
+    echo "Warning: GTX970.rom not found. GPU passthrough may fail."
+fi
+
+# --- 4. Create Bootable ISO with GRUB ---
+echo "--- Creating bootable ISO image: $ISO_NAME ---"
+grub-mkrescue -o "$ISO_NAME" "$ISO_DIR"
+
+# --- 5. Cleanup and Finish ---
+echo "--- Done! ---"
+echo "Bootable ISO created at: $(pwd)/$ISO_NAME"
+echo "You can test it with: qemu-system-x86_64 -m 4096 -cdrom $ISO_NAME"
+
+To run the process:
+
+Build the CAmkES VM (ninja in the build directory).
+
+Place your grub.cfg and GTX970.rom in the project root.
+
+Make the build script executable: chmod +x build_iso.sh.
+
+Run the script: ./build_iso.sh.
+
+This will produce sel4_hypervisor.iso, a bootable image containing your entire system.
