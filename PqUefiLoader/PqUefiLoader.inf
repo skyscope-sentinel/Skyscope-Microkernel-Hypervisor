@@ -1,0 +1,41 @@
+[Defines]
+  INF_VERSION                    = 0x00010005
+  BASE_NAME                      = PqUefiLoader
+  FILE_GUID                      = A0A0A0A0-A0A0-A0A0-A0A0-A0A0A0A0A0A0  # Replace with a unique GUID
+  MODULE_TYPE                    = UEFI_APPLICATION
+  VERSION_STRING                 = 1.0
+  ENTRY_POINT                    = UefiMain
+  DEFINE LIBRARY_NAME            = PqUefiLoaderLib
+
+[Sources]
+  PqUefiLoader.c
+
+[Packages]
+  MdePkg/MdePkg.dec
+  MdeModulePkg/MdeModulePkg.dec
+
+[LibraryClasses]
+  UefiApplicationEntryPoint
+  UefiLib
+  PrintLib
+  PcdLib # Added for potential PCD usage, common in EDKII
+  MemoryAllocationLib # OQS_SIG_new likely needs memory allocation
+
+[Protocols]
+  gEfiSimpleTextOutProtocolGuid
+
+[Guids]
+
+[Pcd]
+
+[BuildOptions]
+  RVCT:*_*_*_CC_FLAGS = -I$(WORKSPACE)/UefiLessonsPkg/PqUefiLoader/liboqs_install/include
+  XCODE:*_*_*_CC_FLAGS = -I$(WORKSPACE)/UefiLessonsPkg/PqUefiLoader/liboqs_install/include
+  GCC:*_*_*_CC_FLAGS = -I$(WORKSPACE)/UefiLessonsPkg/PqUefiLoader/liboqs_install/include
+  MSFT:*_*_*_CC_FLAGS = /I$(WORKSPACE)/UefiLessonsPkg/PqUefiLoader/liboqs_install/include
+
+[UserExtensions.TianoCore."ExtraFiles"]
+  PqUefiLoaderExtra.uni
+
+[Binaries.common]
+  LIB | PqUefiLoader/liboqs_install/lib/liboqs.a | PqUefiLoaderLib
