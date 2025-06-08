@@ -1,0 +1,103 @@
+/*
+ * linux_vm_app.camkes
+ * CAmkES Application assembly for the LinuxVMM component.
+ */
+
+import <std_connector.camkes>; // For seL4Serial, seL4Timer etc.
+
+// It's good practice to import the component type definition
+import "LinuxVMM.camkes";
+
+assembly {
+    composition {
+        // VMM Component
+        component LinuxVMM linux_vmm_comp;
+
+        // Standard CAmkES components for basic services
+        component Timer system_timer_comp;
+        component Serial serial_server_comp;
+
+        // --- Connections ---
+        connection seL4Serial serial_connection(from linux_vmm_comp.serial_port,
+                                               to serial_server_comp.serial);
+
+        connection seL4Timer timer_connection(from linux_vmm_comp.system_timer,
+                                              to system_timer_comp.timer);
+
+        /*
+         * Note on linux_vmm_comp.guest_timer_irq (emits IRQ):
+         * This IRQ is typically injected into the guest VCPU by the VMM using vm_inject_irq().
+         * The actual hardware IRQ line that this virtual IRQ corresponds to within the guest
+         * (e.g., IRQ0 for PIT via the emulated PIC) is managed by the VMM's device model.
+         * No explicit CAmkES connection is usually made from this 'emits IRQ' side in the assembly
+         * if it's a VMM-generated virtual IRQ. If this were for handling a physical device IRQ
+         * that the VMM needs to forward, the setup would be different (e.g. consumes IRQ).
+         */
+    }
+
+    configuration {
+        // --- Configure the LinuxVMM component (linux_vmm_comp) ---
+        linux_vmm_comp {
+            // Guest RAM Configuration (Example: 512MB starting at 1GB physical)
+            // Ensure this physical memory range is available and not used by other components or seL4.
+            guest_ram_paddr_base = "0x40000000"; // 1 GB
+            guest_ram_size = "0x20000000";       // 512 MB
+
+            // VCPU Configuration
+            linux_guest_vcpu_id = 0;    // Base VCPU ID for this guest
+            linux_guest_num_vcpus = 1;  // Number of VCPUs
+
+            // VirtIO Console Configuration
+            virtio_con_mmio_paddr = "0x48000000"; // Example guest physical address for VirtIO Console MMIO (e.g. 1GB + 128MB offset)
+            virtio_con_mmio_size = "0x1000";     // 4KB MMIO region size
+            virtio_con_irq = "10";               // Guest IRQ number for VirtIO console (via emulated PIC/IOAPIC)
+
+
+            // --- Guest Image Loading ---
+            // The CAmkES build system needs to be configured to find these binary files.
+            // This is typically done in the application's Kbuild or CMakeLists.txt file,
+            // where you specify targets like `kernel_binary_file` and `initrd_binary_file`
+            // and the paths to the actual binary image files on the host filesystem.
+            // The build system then embeds these into the CAmkES application image,
+            // and these 'elf_segment' attributes tell CAmkES to make them available
+            // via the specified dataports.
+
+            // Name of the kernel image file as it will appear in the CPIO archive/ramdisk
+            // (or just a label if the VMM doesn't use it for finding in an archive).
+            // This is also used by `load_linux_guest_image` as a label.
+            kernel_image_name = "linux-kernel.bin";
+            // This tells CAmkES to take the content of the ELF segment named "embedded_linux_kernel"
+            // (which should be defined in your build scripts to point to the actual kernel binary file)
+            // and make it accessible via the 'linux_kernel_image' dataport.
+            linux_vmm_comp.linux_kernel_image_elf_segment = "embedded_linux_kernel";
+
+
+            // Name of the initrd image file.
+            initrd_image_name = "linux-initrd.cpio";
+            // Similar to the kernel, this maps the ELF segment "embedded_linux_initrd"
+            // to the 'linux_initrd_image' dataport.
+            linux_vmm_comp.linux_initrd_image_elf_segment = "embedded_linux_initrd";
+
+            // Note: The actual names "embedded_linux_kernel" and "embedded_linux_initrd"
+            // are placeholders. You must ensure your application's build files
+            // (e.g., projects/camkes/apps/my_linux_vm_app/Kbuild or CMakeLists.txt)
+            // define these ELF segments and associate them with the paths to your
+            // kernel and initrd binary files on your host system.
+            // For example, in a Kbuild file, you might have:
+            //   APP_ELF_SEGMENTS += embedded_linux_kernel:$(KERNEL_BIN_PATH)
+            //   APP_ELF_SEGMENTS += embedded_linux_initrd:$(INITRD_CPIO_PATH)
+        }
+
+        // --- Configure standard components (platform specific) ---
+        // Serial server configuration (e.g., which UART, IRQ if applicable)
+        // serial_server_comp.plat_serial_paddr = 0x3F8; // Example for legacy COM1
+        // serial_server_comp.plat_serial_irq = 4;    // Example IRQ for COM1
+
+        // Timer configuration (e.g., which timer device, frequency)
+        // system_timer_comp.timer_attributes.... (depends on the timer component)
+
+        // The specific configuration options for Serial and Timer components
+        // depend on their CAmkES definitions and the target platform.
+        // Consult their respective .camkes files or platform documentation.
+    }
+}
