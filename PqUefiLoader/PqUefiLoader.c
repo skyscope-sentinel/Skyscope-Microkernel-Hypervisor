@@ -72,6 +72,375 @@ typedef struct {
 
 #pragma pack(pop)
 
+// --- ACPI Definitions ---
+#define EFI_ACPI_20_TABLE_GUID \
+  { 0x8868e871, 0xe4f1, 0x11d3, {0xbc, 0x22, 0x00, 0x80, 0xc7, 0x3c, 0x88, 0x81 } }
+#define EFI_ACPI_TABLE_GUID \
+  { 0xeb9d2d30, 0x2d88, 0x11d3, {0x9a, 0x16, 0x00, 0x90, 0x27, 0x3f, 0xc1, 0x4d } }
+
+#define RSDP_SIGNATURE "RSD PTR " // Note the space at the end
+#define MCFG_SIGNATURE "MCFG"
+
+#pragma pack(push, 1)
+typedef struct {
+  CHAR8  Signature[8];
+  UINT8  Checksum;
+  CHAR8  OemId[6];
+  UINT8  Revision;
+  UINT32 RsdtAddress;
+  // ACPI 2.0+ fields
+  UINT32 Length;
+  UINT64 XsdtAddress;
+  UINT8  ExtendedChecksum;
+  UINT8  Reserved[3];
+} RSDP_DESCRIPTOR;
+
+typedef struct {
+  CHAR8  Signature[4];
+  UINT32 Length;
+  UINT8  Revision;
+  UINT8  Checksum;
+  CHAR8  OemId[6];
+  CHAR8  OemTableId[8];
+  UINT32 OemRevision;
+  UINT32 CreatorId;
+  UINT32 CreatorRevision;
+} ACPI_SDT_HEADER;
+
+typedef struct {
+  ACPI_SDT_HEADER Header;
+  UINT64          Entry[]; // Array of physical addresses to other ACPI tables
+} XSDT_TABLE; // Also used for RSDT by only considering Header.Length for iteration
+
+typedef struct {
+  UINT64 BaseAddress;
+  UINT16 PciSegmentGroupNumber;
+  UINT8  StartBusNumber;
+  UINT8  EndBusNumber;
+  UINT32 Reserved;
+} MCFG_ALLOCATION_STRUCTURE; // Renamed to avoid conflict if MCFG_ALLOCATION is a common macro
+
+typedef struct {
+  ACPI_SDT_HEADER Header;
+  UINT64          Reserved;
+  MCFG_ALLOCATION_STRUCTURE Allocation[];
+} MCFG_TABLE;
+
+#pragma pack(pop)
+
+// --- PCI Definitions ---
+#define PCI_CONFIG_ADDRESS(Bus, Device, Function, Register) \
+  ((UINT64)(Bus) << 20 | (UINT32)(Device) << 15 | (UINT32)(Function) << 12 | (UINT32)(Register))
+
+#define PCI_VENDOR_ID_OFFSET         0x00
+#define PCI_DEVICE_ID_OFFSET         0x02
+#define PCI_CLASS_CODE_OFFSET        0x09 // SubClass, ProgIF, BaseClass (BBSSPP)
+#define PCI_HEADER_TYPE_OFFSET       0x0E
+
+typedef struct {
+  UINT16 VendorId;
+  UINT16 DeviceId;
+  UINT8  Bus;
+  UINT8  Device;
+  UINT8  Function;
+  UINT32 ClassCode; // Combined: BaseClass (byte), SubClass (byte), ProgIF (byte)
+} PciDeviceInfo;
+
+// Max PCI devices to store (example)
+#define MAX_PCI_DEVICES_TO_SCAN 32 // Renamed for clarity
+
+// --- Custom Multiboot2 Hardware Info Tag ---
+#define MULTIBOOT_TAG_TYPE_HW_INFO 0xABCDEF01 // Example custom type for our hardware info
+
+#pragma pack(push, 1)
+// Base structure for the HW info tag
+typedef struct {
+  UINT32 Type;
+  UINT32 Size;
+  UINT32 NumPciDevs;
+  // PciDeviceInfo PciDevs[]; // Data follows here
+} MultibootTagHwInfoBase;
+
+// A structure that includes a fixed-size array for PciDevs for easier allocation
+// and use within PqUefiLoader. The actual tag written to MB2 info will have
+// its size field set to reflect only the actual number of devices.
+typedef struct {
+  MultibootTagHwInfoBase Base;
+  PciDeviceInfo          PciDevs[MAX_PCI_DEVICES_TO_SCAN];
+} MultibootTagHwInfoWithPci;
+#pragma pack(pop)
+
+// --- Helper function to validate ACPI SDT table checksum ---
+STATIC
+BOOLEAN
+IsAcpiSdtChecksumValid (
+  IN ACPI_SDT_HEADER *Table
+  )
+{
+  UINT8 Sum = 0;
+  if (Table == NULL) {
+    return FALSE;
+  }
+  for (UINT32 i = 0; i < Table->Length; i++) {
+    Sum += ((UINT8 *)Table)[i];
+  }
+  return Sum == 0;
+}
+
+// --- Helper function to find ACPI tables (RSDP, XSDT/RSDT, and specific table like MCFG) ---
+STATIC
+EFI_STATUS
+FindAcpiSystemTables (
+  OUT RSDP_DESCRIPTOR **RsdpPtr,
+  OUT ACPI_SDT_HEADER **RootSdtPtr, // Can be RSDT or XSDT
+  OUT VOID            **McfgTablePtr // Generic pointer for MCFG or other tables
+  )
+{
+  EFI_STATUS      Status;
+  EFI_GUID        Acpi20TableGuid = EFI_ACPI_20_TABLE_GUID;
+  EFI_GUID        AcpiTableGuid = EFI_ACPI_TABLE_GUID; // For ACPI 1.0
+  RSDP_DESCRIPTOR *LocalRsdp = NULL;
+  ACPI_SDT_HEADER *LocalRootSdt = NULL; // Points to XSDT or RSDT
+  VOID            *SpecificTable = NULL;
+  UINTN           i;
+
+  if (RsdpPtr == NULL || RootSdtPtr == NULL || McfgTablePtr == NULL) {
+    return EFI_INVALID_PARAMETER;
+  }
+
+  // Initialize output parameters
+  *RsdpPtr = NULL;
+  *RootSdtPtr = NULL;
+  *McfgTablePtr = NULL;
+
+  // Step 1: Find RSDP
+  // Try ACPI 2.0+ GUID first
+  Status = LibGetSystemConfigurationTable(&Acpi20TableGuid, (VOID**)&LocalRsdp);
+  if (EFI_ERROR(Status) || LocalRsdp == NULL) {
+    // Try ACPI 1.0 GUID if 2.0+ fails
+    Status = LibGetSystemConfigurationTable(&AcpiTableGuid, (VOID**)&LocalRsdp);
+    if (EFI_ERROR(Status) || LocalRsdp == NULL) {
+      Print(L"Failed to find any ACPI RSDP: %r\n", Status);
+      return Status;
+    }
+  }
+
+  // Validate RSDP Signature
+  if (AsciiStrnCmp(LocalRsdp->Signature, RSDP_SIGNATURE, 8) != 0) {
+    Print(L"RSDP signature invalid.\n");
+    return EFI_CRC_ERROR;
+  }
+
+  // Validate RSDP Checksum (for ACPI 1.0 part)
+  UINT8 Checksum = 0;
+  for (i = 0; i < OFFSET_OF(RSDP_DESCRIPTOR, Length); i++) { // Length field is start of ACPI 2.0 part
+    Checksum += ((UINT8 *)LocalRsdp)[i];
+  }
+  if (Checksum != 0) {
+    Print(L"RSDP (ACPI 1.0 part) checksum invalid.\n");
+    // return EFI_CRC_ERROR; // Be lenient for now, some firmware might have issues
+  }
+
+  // If ACPI 2.0+, validate Extended Checksum
+  if (LocalRsdp->Revision >= 2) {
+    Checksum = 0; // Reset for full length
+    for (i = 0; i < LocalRsdp->Length; i++) {
+      Checksum += ((UINT8 *)LocalRsdp)[i];
+    }
+    if (Checksum != 0) {
+      Print(L"RSDP Extended (ACPI 2.0+ part) checksum invalid.\n");
+      // return EFI_CRC_ERROR; // Be lenient
+    }
+  }
+  Print(L"RSDP found at 0x%p (Revision: %d)\n", LocalRsdp, LocalRsdp->Revision);
+  *RsdpPtr = LocalRsdp;
+
+  // Step 2: Get Root SDT (XSDT for ACPI 2.0+, RSDT for ACPI 1.0)
+  if (LocalRsdp->Revision >= 2 && LocalRsdp->XsdtAddress != 0) {
+    LocalRootSdt = (ACPI_SDT_HEADER *)(UINTN)LocalRsdp->XsdtAddress;
+    Print(L"Using XSDT at 0x%lX\n", LocalRsdp->XsdtAddress);
+  } else if (LocalRsdp->RsdtAddress != 0) {
+    LocalRootSdt = (ACPI_SDT_HEADER *)(UINTN)LocalRsdp->RsdtAddress;
+    Print(L"Using RSDT at 0x%X\n", LocalRsdp->RsdtAddress);
+  } else {
+    Print(L"No XSDT or RSDT address found in RSDP.\n");
+    return EFI_NOT_FOUND;
+  }
+  *RootSdtPtr = LocalRootSdt;
+
+  // Validate Root SDT Header and Checksum
+  if (!IsAcpiSdtChecksumValid(LocalRootSdt)) {
+    Print(L"Warning: Root SDT (%.4a) checksum invalid, but proceeding.\n", LocalRootSdt->Signature);
+    // Proceeding anyway as some firmware might have incorrect checksums.
+  }
+   Print(L"Root SDT (%.4a) found with Length: %d\n", LocalRootSdt->Signature, LocalRootSdt->Length);
+
+
+  // Step 3: Iterate Root SDT to find the MCFG table
+  UINTN NumEntries;
+  BOOLEAN IsXsdt = (AsciiStrnCmp(LocalRootSdt->Signature, "XSDT", 4) == 0);
+
+  if (IsXsdt) {
+    NumEntries = (LocalRootSdt->Length - sizeof(ACPI_SDT_HEADER)) / sizeof(UINT64);
+  } else { // RSDT
+    NumEntries = (LocalRootSdt->Length - sizeof(ACPI_SDT_HEADER)) / sizeof(UINT32);
+  }
+  Print(L"Root SDT (%.4a) has %d entries.\n", LocalRootSdt->Signature, NumEntries);
+
+  for (i = 0; i < NumEntries; i++) {
+    ACPI_SDT_HEADER *CurrentTableHdr;
+    UINT64          TableAddress = 0;
+
+    if (IsXsdt) {
+      TableAddress = ((XSDT_TABLE *)LocalRootSdt)->Entry[i];
+    } else { // RSDT
+      TableAddress = (UINT64)((UINT32 *)((XSDT_TABLE *)LocalRootSdt)->Entry)[i];
+    }
+
+    CurrentTableHdr = (ACPI_SDT_HEADER *)(UINTN)TableAddress;
+
+    if (CurrentTableHdr == NULL || CurrentTableHdr < (ACPI_SDT_HEADER*)0x1000 || TableAddress == 0) {
+      // Print(L"Skipping potentially invalid table address (0x%lX) at index %d.\n", TableAddress, i);
+      continue;
+    }
+
+    // Check if the mapped address is valid and readable up to header size at least
+    // This is a basic check; proper memory map checking would be more robust.
+    if (TableAddress > 0xFFFFFFFF && sizeof(UINTN) == 4) { // Avoid dereferencing high addresses on 32-bit builds if that's an issue
+        // Print(L"Skipping high address table 0x%lX on 32-bit system model (index %d)\n", TableAddress, i);
+        continue;
+    }
+    // A more robust check involves querying memory map for readability. For now, direct dereference.
+
+    // Print(L"  Table %d at 0x%lX Signature: %.4a\n", i, TableAddress, CurrentTableHdr->Signature);
+
+    if (AsciiStrnCmp(CurrentTableHdr->Signature, MCFG_SIGNATURE, 4) == 0) {
+      if (IsAcpiSdtChecksumValid(CurrentTableHdr)) {
+        SpecificTable = (VOID *)CurrentTableHdr;
+        Print(L"MCFG table found at 0x%lX and checksum valid.\n", TableAddress);
+        break;
+      } else {
+        Print(L"MCFG table found at 0x%lX, but checksum invalid. Trying to use anyway.\n", TableAddress);
+        SpecificTable = (VOID *)CurrentTableHdr; // Use even if checksum is bad
+        break;
+      }
+    }
+  }
+
+  if (SpecificTable != NULL) {
+    *McfgTablePtr = SpecificTable;
+  } else {
+    Print(L"MCFG table not found in Root SDT (%.4a).\n", LocalRootSdt->Signature);
+    // This is not an error for FindAcpiSystemTables itself, caller checks McfgTablePtr
+  }
+
+  return EFI_SUCCESS;
+}
+
+// --- Helper function to scan PCI devices using MCFG ---
+STATIC
+UINT32
+ScanPciDevices (
+  IN  MCFG_TABLE    *Mcfg,
+  OUT PciDeviceInfo *PciDevicesList, // Renamed for clarity
+  IN  UINT32        MaxDevicesToScan // Renamed for clarity
+  )
+{
+  UINT32 DeviceCount = 0;
+  UINTN  NumAllocations;
+
+  if (Mcfg == NULL || PciDevicesList == NULL || MaxDevicesToScan == 0) {
+    return 0;
+  }
+
+  // Calculate the number of MCFG allocation structures.
+  // Header.Length includes the full size of the table.
+  // Subtract size of header and the UINT64 Reserved field before Allocation array.
+  if (Mcfg->Header.Length < (sizeof(ACPI_SDT_HEADER) + sizeof(UINT64))) {
+      Print(L"MCFG table length too small to contain allocations.\n");
+      return 0;
+  }
+  NumAllocations = (Mcfg->Header.Length - (sizeof(ACPI_SDT_HEADER) + sizeof(UINT64))) / sizeof(MCFG_ALLOCATION_STRUCTURE);
+  Print(L"MCFG Table (Length: %d) has %d allocation structure(s).\n", Mcfg->Header.Length, NumAllocations);
+
+  for (UINTN i = 0; i < NumAllocations; i++) {
+    MCFG_ALLOCATION_STRUCTURE *Alloc = &Mcfg->Allocation[i];
+    Print(L"  MCFG Allocation %d: BaseAddr=0x%lX, SegGrp=%d, BusStart=%d, BusEnd=%d\n",
+          i, Alloc->BaseAddress, Alloc->PciSegmentGroupNumber, Alloc->StartBusNumber, Alloc->EndBusNumber);
+
+    // Iterate through buses for this allocation structure
+    // For simplicity, we'll limit the bus scan range here, e.g., scan only a few buses
+    // A full scan would be: For (UINT16 Bus = Alloc->StartBusNumber; Bus <= Alloc->EndBusNumber; Bus++)
+    UINT8 BusScanEnd = Alloc->StartBusNumber + 2; // Scan only first 2 buses in range, or fewer if range is smaller
+    if (BusScanEnd > (Alloc->EndBusNumber + 1)) {
+        BusScanEnd = Alloc->EndBusNumber + 1;
+    }
+    if (BusScanEnd <= Alloc->StartBusNumber && Alloc->EndBusNumber >= Alloc->StartBusNumber) { // Ensure at least one bus if range is valid
+        BusScanEnd = Alloc->StartBusNumber + 1;
+    }
+
+
+    for (UINT16 Bus = Alloc->StartBusNumber; Bus < BusScanEnd; Bus++) {
+      for (UINT8 Device = 0; Device < 32; Device++) {
+        for (UINT8 Function = 0; Function < 8; Function++) {
+          if (DeviceCount >= MaxDevicesToScan) {
+            return DeviceCount;
+          }
+
+          UINT64 ConfigSpacePciExBase = Alloc->BaseAddress;
+          // UEFI identity-maps physical memory, so we can cast physical PCI-E config space address to a pointer.
+          UINTN PciDeviceConfigBaseAddress = (UINTN)ConfigSpacePciExBase +
+                                             PCI_CONFIG_ADDRESS((UINT8)Bus, Device, Function, 0);
+
+          volatile UINT16 *VendorIdPtr = (volatile UINT16 *)(PciDeviceConfigBaseAddress + PCI_VENDOR_ID_OFFSET);
+
+          // Check if Vendor ID is valid (not 0xFFFF)
+          if (*VendorIdPtr == 0xFFFF) {
+            if (Function == 0) { // If Func 0 doesn't exist, no other funcs for this device exist
+                break;
+            }
+            continue; // Skip this function
+          }
+
+          PciDevicesList[DeviceCount].VendorId = *VendorIdPtr;
+          PciDevicesList[DeviceCount].DeviceId = *(volatile UINT16 *)(PciDeviceConfigBaseAddress + PCI_DEVICE_ID_OFFSET);
+
+          // Read Class Code (3 bytes: BaseClass, SubClass, ProgIF)
+          // BaseClass is at offset 0x0B, SubClass at 0x0A, ProgIF at 0x09
+          // We read them in that order to form BBSSPP
+          UINT8 BaseClass = *(volatile UINT8 *)(PciDeviceConfigBaseAddress + PCI_CLASS_CODE_OFFSET + 2); // Offset 0x0B
+          UINT8 SubClass  = *(volatile UINT8 *)(PciDeviceConfigBaseAddress + PCI_CLASS_CODE_OFFSET + 1); // Offset 0x0A
+          UINT8 ProgIF    = *(volatile UINT8 *)(PciDeviceConfigBaseAddress + PCI_CLASS_CODE_OFFSET + 0); // Offset 0x09
+          PciDevicesList[DeviceCount].ClassCode = ((UINT32)BaseClass << 16) | ((UINT32)SubClass << 8) | ProgIF;
+
+          PciDevicesList[DeviceCount].Bus = (UINT8)Bus;
+          PciDevicesList[DeviceCount].Device = Device;
+          PciDevicesList[DeviceCount].Function = Function;
+
+          Print(L"PCI: %02X:%02X.%X VID:%04X DID:%04X Class:%06X\n",
+                Bus, Device, Function,
+                PciDevicesList[DeviceCount].VendorId,
+                PciDevicesList[DeviceCount].DeviceId,
+                PciDevicesList[DeviceCount].ClassCode);
+
+          DeviceCount++;
+
+          // If this is function 0, check if it's a multi-function device.
+          // If not, no need to check other functions for this device.
+          if (Function == 0) {
+            UINT8 HeaderType = *(volatile UINT8 *)(PciDeviceConfigBaseAddress + PCI_HEADER_TYPE_OFFSET);
+            if (!(HeaderType & 0x80)) { // Bit 7 indicates multi-function
+              break; // Not a multi-function device, move to next device
+            }
+          }
+        }
+      }
+    }
+  }
+  return DeviceCount;
+}
+
+
 // --- ELF64 Definitions (subset) ---
 #define EI_NIDENT 16
 #define ELFMAG0   0x7f
@@ -569,11 +938,19 @@ LoadFileIntoLoaderPages (
 
 
   VOID* mb2InfoBuffer = NULL;
-  // Allocate a larger buffer for MB2 info, as memory map can be significant.
-  // 2 pages (8KB) should be a reasonable starting point.
-  UINTN mb2InfoSize = EFI_PAGE_SIZE * 2;
+  // Allocate a larger buffer for MB2 info, as memory map + PCI info can be significant.
+  // Increased to 4 pages (16KB) as a safer starting point.
+  UINTN mb2InfoSize = EFI_PAGE_SIZE * 4;
   UINT8* currentMb2TagPtr = NULL;
   // UINTN i; // Loop counter for key initialization - NO LONGER NEEDED
+
+  // ACPI/PCI related variables
+  RSDP_DESCRIPTOR *Rsdp = NULL;
+  ACPI_SDT_HEADER *RootSdt = NULL;
+  VOID            *McfgTableVoid = NULL; // Use VOID* for McfgTablePtr from FindAcpiSystemTables
+  MCFG_TABLE      *Mcfg = NULL;
+  PciDeviceInfo   PciDevicesFound[MAX_PCI_DEVICES_TO_SCAN];
+  UINT32          NumPciDevicesFound = 0;
 
   // mlDsa65PublicKey is now a static const global array, no runtime initialization needed.
 
@@ -694,6 +1071,24 @@ LoadFileIntoLoaderPages (
       Print(L"WARNING: Kernel entry point is 0. This might be an issue.\n");
   }
 
+  // --- ACPI and PCI Scan ---
+  Print(L"PqUefiLoader: Starting ACPI table discovery...\n");
+  Status = FindAcpiSystemTables(&Rsdp, &RootSdt, &McfgTableVoid);
+  if (EFI_ERROR(Status)) {
+      Print(L"ACPI system table discovery failed: %r\n", Status);
+      // Not fatal, Mcfg will remain NULL.
+  } else {
+      Print(L"RSDP found at 0x%p, Root SDT (%.4a) at 0x%p\n", Rsdp, RootSdt->Signature, RootSdt);
+      if (McfgTableVoid != NULL) {
+          Mcfg = (MCFG_TABLE *)McfgTableVoid; // Cast to specific type
+          Print(L"MCFG table found at 0x%p. Starting PCI scan...\n", Mcfg);
+          NumPciDevicesFound = ScanPciDevices(Mcfg, PciDevicesFound, MAX_PCI_DEVICES_TO_SCAN);
+          Print(L"PCI Scan complete. Found %d devices.\n", NumPciDevicesFound);
+      } else {
+          Print(L"MCFG table NOT found.\n");
+      }
+  }
+  // --- End ACPI and PCI Scan ---
 
   // --- Prepare Multiboot2 Information ---
   Print(L"Preparing Multiboot2 information (using physical addresses)...\n");
@@ -720,6 +1115,38 @@ LoadFileIntoLoaderPages (
 
   // --- Module Tags ---
   // Ensure currentMb2TagPtr is correctly advanced and there's space.
+
+  // --- Custom Hardware Info Tag (with PCI devices) ---
+  // This tag should be added *before* the End Tag and after other essential tags like Mmap and Modules.
+  if (NumPciDevicesFound > 0) {
+    UINTN actualPciDataPayloadSize = NumPciDevicesFound * sizeof(PciDeviceInfo);
+    UINTN hwInfoTagRequiredDataPortionSize = sizeof(MultibootTagHwInfoBase) + actualPciDataPayloadSize;
+    // Align the total size of the tag up to MULTIBOOT_TAG_ALIGN
+    UINT32 hwInfoTagTotalAlignedSize = (UINT32)((hwInfoTagRequiredDataPortionSize + MULTIBOOT_TAG_ALIGN - 1) & ~(MULTIBOOT_TAG_ALIGN - 1));
+
+    Print(L"Preparing Custom HW Info Tag: PCI Devs=%d, DataPayloadSize=%d, TotalAlignedTagSize=%d\n",
+        NumPciDevicesFound, actualPciDataPayloadSize, hwInfoTagTotalAlignedSize);
+
+    if (((UINTN)currentMb2TagPtr + hwInfoTagTotalAlignedSize) > ((UINTN)mb2InfoBuffer + mb2InfoSize)) {
+        Print(L"ERROR: Not enough space in MB2 buffer for Custom HW Info tag (Need %d, Have %d remaining approx).\n",
+              hwInfoTagTotalAlignedSize, (UINTN)mb2InfoBuffer + mb2InfoSize - (UINTN)currentMb2TagPtr);
+        // Not treating as fatal for now, just skipping the tag.
+    } else {
+        MultibootTagHwInfoBase *hwInfoTag = (MultibootTagHwInfoBase*)currentMb2TagPtr;
+        hwInfoTag->Type = MULTIBOOT_TAG_TYPE_HW_INFO;
+        hwInfoTag->Size = hwInfoTagTotalAlignedSize;
+        hwInfoTag->NumPciDevs = NumPciDevicesFound;
+
+        // Copy PciDevicesFound data immediately after the MultibootTagHwInfoBase part of the tag
+        UINT8* pciDataDestinationInTag = (UINT8*)currentMb2TagPtr + sizeof(MultibootTagHwInfoBase);
+        gBS->CopyMem(pciDataDestinationInTag, PciDevicesFound, actualPciDataPayloadSize);
+
+        Print(L"  Custom HW Info Tag added: Type=0x%X, Size=%d, PCI Devs=%d\n",
+               hwInfoTag->Type, hwInfoTag->Size, hwInfoTag->NumPciDevs);
+        currentMb2TagPtr += hwInfoTag->Size; // Advance by the aligned size
+    }
+  }
+
   CHAR8 kernelModuleName[] = "kernel";
   CHAR8 payloadModuleName[] = "vmm_payload";
   UINTN kernelModuleNameLen = sizeof(kernelModuleName); // includes null terminator

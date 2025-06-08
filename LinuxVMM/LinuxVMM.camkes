@@ -1,0 +1,87 @@
+/*
+ * LinuxVMM.camkes
+ * CAmkES component definition for a Linux Virtual Machine Monitor
+ */
+
+import <std_connector.camkes>; // For seL4Serial, Timer etc.
+// We might need specific VMM connectors or interfaces later
+// import <sel4vm/sel4vm.camkes>; // If sel4vm provides standard interfaces
+
+component LinuxVMM {
+    control; // Indicates an active component with a thread
+
+    // --- Configuration ---
+    // These values are examples and would typically be set by the application assembler
+    // or a higher-level configuration system.
+    // Note: CAmkES configuration values are strings, they need to be parsed in C.
+    attribute String guest_ram_size = "0x20000000";  // Default 512MB
+    attribute String guest_ram_paddr_base = "0x40000000"; // Default physical base for guest RAM
+    attribute String kernel_image_name = "linux-kernel.bin";
+    attribute String initrd_image_name = "linux-initrd.cpio";
+
+    attribute int linux_guest_vcpu_id = 0;    // Base VCPU ID for this guest
+    attribute int linux_guest_num_vcpus = 1;  // Number of VCPUs for this guest
+
+    // VirtIO Console Configuration
+    attribute String virtio_con_mmio_paddr = "0x48000000"; // Example guest physical address for VirtIO Console MMIO
+    attribute String virtio_con_mmio_size = "0x1000";     // 4KB MMIO region size
+    attribute String virtio_con_irq = "10";               // Example guest IRQ number for VirtIO console
+
+    // PCI Passthrough Device Configuration (Example: an Intel e1000 NIC)
+    attribute String passthrough_nic_vid = "0x8086";      // Vendor ID to search for
+    attribute String passthrough_nic_did = "0x100E";      // Device ID to search for
+    // Note: The physical BAR address and size are usually determined by the host PCI scan (PqUefiLoader).
+    // For CAmkES, we'd typically map the *actual* physical memory of the found device.
+    // These attributes here are more for *identifying* the device if multiple are present,
+    // or for systems where BARs are fixed and known prior to VMM start.
+    // A more dynamic approach would involve the VMM communicating discovered BARs/IRQs
+    // to a root CNode or using dynamic capabilities if the platform supports it.
+    // For this example, we assume these might be used to *verify* a found device
+    // or in a very static configuration. The actual mapping will use CAmkES mechanisms.
+    attribute String passthrough_nic_bar0_paddr_expected = "0xA0000000"; // Expected BAR0 paddr (for verification/selection)
+    attribute String passthrough_nic_bar0_size_config = "0x20000";    // Expected BAR0 size (128KB)
+    attribute String passthrough_nic_assigned_irq = "5";             // Physical IRQ assigned to this device by host
+
+
+    // --- Interfaces ---
+    // For VMM's own debug output and potentially guest TTY later
+    uses seL4Serial serial_port;
+
+    // System timer for VMM and potentially for virtual timer emulation
+    uses Timer system_timer;
+    // IRQ to be emitted by the VMM and connected to the guest's VCPU for timer events
+    emits IRQ guest_timer_irq;
+
+    // Dataports for loading Linux kernel and initrd images
+    // The actual content will be mapped in by the application assembler.
+    // Sizes are indicative; actual size determined by mapped region.
+    dataport Buf(0x1000000) linux_kernel_image; // 16MB for kernel image
+    dataport Buf(0x4000000) linux_initrd_image; // 64MB for initrd image
+
+    // VCPU related interfaces (conceptual for now, will be refined)
+    // consumes seL4VMEvent vcpu_event; // Example: for VCPU events like VMFault
+    // provides seL4VMControl vcpu_control; // Example: to control VCPU (run, pause)
+
+    // --- PCI Passthrough Device Resources ---
+    // Dataport for BAR0 memory region of the passthrough NIC.
+    // The size "0x20000" should match passthrough_nic_bar0_size_config or be dynamically set.
+    // The CAmkES build system/root CNode will map the actual physical BAR0 address of the
+    // PCI device to this dataport based on application assembly configuration.
+    // Permissions (e.g., R=1, W=1, X=0 -> 0x3) depend on the BAR type (memory/IO).
+    // For a typical memory BAR, R/W is needed.
+    dataport Buf(0x20000) passthrough_nic_bar0_mem R=1, W=1; // Assuming 128KB size from attribute
+
+    // Consumes an IRQ event from the host system, corresponding to the passthrough NIC's interrupt.
+    // The actual physical IRQ number is configured in the .camkes app assembly,
+    // and the CAmkES infrastructure routes it to this event.
+    consumes IRQ passthrough_nic_irq_event;
+
+
+    // --- Composition Notes (for application assembler) ---
+    // This component will require:
+    // - Connection to a platform serial driver instance (for 'serial_port').
+    // - Connection to a platform timer driver instance (for 'system_timer').
+    // - The 'guest_timer_irq' will need to be connected to a VCPU component's IRQ input.
+    // - 'linux_kernel_image' and 'linux_initrd_image' dataports need to be mapped
+    //   to shared memory regions containing the respective binary blobs.
+}
