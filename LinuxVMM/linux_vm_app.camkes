@@ -78,14 +78,75 @@ assembly {
             // to the 'linux_initrd_image' dataport.
             linux_vmm_comp.linux_initrd_image_elf_segment = "embedded_linux_initrd";
 
-            // Note: The actual names "embedded_linux_kernel" and "embedded_linux_initrd"
-            // are placeholders. You must ensure your application's build files
+            // --- PCI Passthrough NIC Configuration ---
+            // These attributes should match a device discoverable by PqUefiLoader's PCI scan.
+            passthrough_nic_vid = "0x8086";      // Intel Vendor ID (example)
+            passthrough_nic_did = "0x100E";      // e1000 NIC Device ID (example)
+            passthrough_nic_bar0_paddr_expected = "0xA0000000"; // For VMM internal verification/selection
+            passthrough_nic_bar0_size_config = "0x20000";    // 128KB, must match dataport size in LinuxVMM.camkes
+            passthrough_nic_assigned_irq = "5";              // Physical IRQ for the NIC
+
+            // --- PCI Passthrough GPU Configuration (Example: Nvidia GTX 970) ---
+            passthrough_gpu_vid = "0x10DE";
+            passthrough_gpu_did = "0x13C2";
+            // Expected physical addresses (for VMM's verification or selection logic if multiple GPUs)
+            // These are NOT used by CAmkES directly to map memory but can guide VMM or CapDL scripts.
+            passthrough_gpu_bar0_paddr_expected = "0xc0000000";
+            passthrough_gpu_bar1_paddr_expected = "0xd0000000";
+            passthrough_gpu_bar3_paddr_expected = "0xd8000000";
+            // Configured sizes for BARs (must match dataport sizes in LinuxVMM.camkes)
+            passthrough_gpu_bar0_size_config = "0x1000000";   // 16MB
+            passthrough_gpu_bar1_size_config = "0x10000000";  // 256MB
+            passthrough_gpu_bar3_size_config = "0x2000000";   // 32MB
+            passthrough_gpu_assigned_irq = "11";             // Example physical IRQ for GPU
+
+            // VBIOS configuration
+            gpu_vbios_image_name = "vbios-gtx970.rom"; // Name for VMM to identify VBIOS
+            linux_vmm_comp.gpu_vbios_image_dataport_elf_segment = "embedded_gpu_vbios";
+
+            /*
+             * ================================================================================
+             * IMPORTANT CapDL / Physical Memory Mapping Note for GPU BARs:
+             * ================================================================================
+             * The `passthrough_gpu_barX_mem` dataports in `LinuxVMM.camkes` allow VMM access.
+             * For these to map to *actual* GPU BAR physical memory, the CapDL generator
+             * (or equivalent platform mechanism) must map these physical regions (discovered
+             * by a bootloader like PqUefiLoader or known from hardware specs) to the
+             * CAmkES dataport symbols (e.g., `linux_vmm_comp_passthrough_gpu_bar0_mem_obj`).
+             * Attributes like `passthrough_gpu_barX_paddr_expected` are for VMM internal logic.
+             *
+             * Custom attributes (NOT STANDARD CAmkES) could hint to a CapDL generator:
+             *   // linux_vmm_comp.custom_capdl_map_gpu_bar0_paddr = "0xc0000000";
+             *   // linux_vmm_comp.custom_capdl_map_gpu_bar0_to_dataport = "passthrough_gpu_bar0_mem";
+             * These would be parsed by a specialized script to generate CapDL. Without this,
+             * dataports are just RAM.
+             * ================================================================================
+             */
+
+            // Note: The names "embedded_linux_kernel", "embedded_linux_initrd", and "embedded_gpu_vbios"
+            // are placeholders. Ensure your application's build files (CMakeLists.txt)
+            // define these ELF segments using `camkes_add_elf_segment_source` and link them
+            // to the actual kernel, initrd, and VBIOS binary files.
             // (e.g., projects/camkes/apps/my_linux_vm_app/Kbuild or CMakeLists.txt)
             // define these ELF segments and associate them with the paths to your
             // kernel and initrd binary files on your host system.
             // For example, in a Kbuild file, you might have:
             //   APP_ELF_SEGMENTS += embedded_linux_kernel:$(KERNEL_BIN_PATH)
             //   APP_ELF_SEGMENTS += embedded_linux_initrd:$(INITRD_CPIO_PATH)
+
+            // --- VirtIO Block Device Configuration (for Windows guest disk) ---
+            virtio_blk_mmio_paddr = "0x48001000";      // Guest physical address for VirtIO Blk MMIO
+            virtio_blk_mmio_size = "0x1000";          // 4KB MMIO region size
+            virtio_blk_irq = "12";                    // Guest IRQ for VirtIO Blk
+            windows_disk_image_name = "windows-hdd.img"; // Symbolic name for disk image
+            // Size must match the dataport size in LinuxVMM.camkes
+            windows_disk_image_size_config = "0x400000000"; // 16GB example
+            linux_vmm_comp.windows_disk_image_dataport_elf_segment = "embedded_windows_disk_image";
+            // Note: "embedded_windows_disk_image" must be defined in CMakeLists.txt using
+            // camkes_add_elf_segment_source to point to the actual raw disk image file.
+
+            // --- Guest OS Type ---
+            is_windows_guest = "true"; // Indicate that this VM instance is configured for Windows
         }
 
         // --- Configure standard components (platform specific) ---

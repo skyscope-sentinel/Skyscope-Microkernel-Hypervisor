@@ -9,6 +9,90 @@
 #include <oqs/oqs.h>
 #include <oqs/sig_ml_dsa.h> // For OQS_SIG_ML_DSA_65_LENGTH_PUBLIC_KEY
 
+// For LibGetSystemConfigurationTable
+#include <Library/UefiRuntimeServicesTableLib.h> // For gRT
+#include <Guid/Acpi.h> // For ACPI table GUIDs
+
+// --- Boot Branding Function ---
+STATIC
+VOID
+DisplayBootBranding (
+  VOID
+  )
+{
+  EFI_STATUS Status;
+  UINTN      Columns = 80, Rows = 25; // Default if QueryMode fails
+  UINTN      OriginalAttribute;
+
+  // Store original attribute to restore later
+  OriginalAttribute = gST->ConOut->Mode->Attribute;
+
+  // Get current screen dimensions
+  Status = gST->ConOut->QueryMode(gST->ConOut, gST->ConOut->Mode->Mode, &Columns, &Rows);
+  if (EFI_ERROR(Status)) {
+    Print(L"Warning: Failed to query screen dimensions, using default 80x25. Status: %r\n", Status);
+    Columns = 80; // Fallback
+    Rows = 25;    // Fallback
+  }
+
+  gST->ConOut->ClearScreen(gST->ConOut);
+  gST->ConOut->EnableCursor(gST->ConOut, FALSE); // Hide cursor
+
+  CHAR16* Line1 = L"Skyscope Sentinel Intelligence";
+  CHAR16* Line2 = L"presents";
+  CHAR16* Line3 = L"Skyscope Micro Kernel Hypervisor";
+  CHAR16* Line4 = L"Developed By Casey Jay Topojani"; // Or split if needed
+
+  UINTN Line1Len = StrLen(Line1);
+  UINTN Line2Len = StrLen(Line2);
+  UINTN Line3Len = StrLen(Line3);
+  UINTN Line4Len = StrLen(Line4);
+
+  UINTN CenterColLine1 = (Columns > Line1Len) ? ((Columns - Line1Len) / 2) : 0;
+  UINTN CenterColLine2 = (Columns > Line2Len) ? ((Columns - Line2Len) / 2) : 0;
+  UINTN CenterColLine3 = (Columns > Line3Len) ? ((Columns - Line3Len) / 2) : 0;
+  UINTN RightColLine4  = (Columns > Line4Len + 1) ? (Columns - Line4Len - 1) : 0;
+
+  UINTN RowPos = (Rows > 10) ? (Rows / 4) : 1; // Start a quarter way down, or row 1
+
+  // Line 1
+  gST->ConOut->SetCursorPosition(gST->ConOut, CenterColLine1, RowPos);
+  gST->ConOut->SetAttribute(gST->ConOut, EFI_WHITE | EFI_BACKGROUND_BLACK);
+  gST->ConOut->OutputString(gST->ConOut, Line1);
+
+  // Line 2
+  RowPos += 2; // 2 rows below
+  if (RowPos >= Rows -1) RowPos = Rows - 2; // Ensure it's on screen
+  gST->ConOut->SetCursorPosition(gST->ConOut, CenterColLine2, RowPos);
+  gST->ConOut->SetAttribute(gST->ConOut, EFI_LIGHTGRAY | EFI_BACKGROUND_BLACK);
+  gST->ConOut->OutputString(gST->ConOut, Line2);
+
+  // Line 3
+  RowPos += 1; // 1 row below
+  if (RowPos >= Rows -1) RowPos = Rows - 2;
+  gST->ConOut->SetCursorPosition(gST->ConOut, CenterColLine3, RowPos);
+  gST->ConOut->SetAttribute(gST->ConOut, EFI_WHITE | EFI_BACKGROUND_BLACK); // White for "boldness"
+  gST->ConOut->OutputString(gST->ConOut, Line3);
+
+  // Line 4 - Right aligned
+  UINTN Line4RowPos = (Rows > 2) ? (Rows - 2) : (Rows -1);
+  if (Line4RowPos < RowPos + 2 && Rows > RowPos +2) Line4RowPos = RowPos + 2; // Ensure it's after previous lines if possible
+  else if (Line4RowPos <= RowPos) Line4RowPos = Rows -1; // Last resort, put on last line
+
+  gST->ConOut->SetCursorPosition(gST->ConOut, RightColLine4, Line4RowPos);
+  gST->ConOut->SetAttribute(gST->ConOut, EFI_LIGHTGRAY | EFI_BACKGROUND_BLACK); // Gray for less emphasis
+  gST->ConOut->OutputString(gST->ConOut, Line4);
+
+  // Optional: Delay for a few seconds
+  gBS->Stall(3 * 1000 * 1000); // 3 seconds
+
+  // Restore original attributes and show cursor (optional, or clear screen again before next output)
+  // gST->ConOut->SetAttribute(gST->ConOut, OriginalAttribute);
+  // gST->ConOut->EnableCursor(gST->ConOut, TRUE);
+  // For this bootloader, we might just leave the branding and let subsequent prints overwrite or clear.
+}
+
+
 // --- Multiboot2 Tag Definitions ---
 #define MULTIBOOT_TAG_ALIGN         8
 #define MULTIBOOT_TAG_TYPE_END      0
@@ -955,6 +1039,17 @@ LoadFileIntoLoaderPages (
   // mlDsa65PublicKey is now a static const global array, no runtime initialization needed.
 
   Print(L"PqUefiLoader starting...\n");
+
+  // Display boot branding early
+  DisplayBootBranding();
+
+  // Optionally clear screen again if branding should only be temporary,
+  // or let subsequent messages print over/after it.
+  // gST->ConOut->ClearScreen(gST->ConOut);
+  // gST->ConOut->EnableCursor(gST->ConOut, TRUE); // Re-enable cursor if hidden
+
+  Print(L"Continuing boot process after branding...\n");
+
 
   // --- Load Kernel and Payload into EfiLoaderData ---
   Status = LoadFileIntoLoaderPages(KERNEL_FILENAME, &kernelPhysicalAddress, &kernelFileSize);
