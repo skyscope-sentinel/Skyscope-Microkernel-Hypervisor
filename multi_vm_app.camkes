@@ -1,0 +1,130 @@
+/*
+ * multi_vm_app.camkes
+ * CAmkES application assembly for multiple GuestVmm instances managed by VmManager.
+ */
+
+import <std_connector.camkes>;
+import <FileServer.camkes>; // Example, if VmManager or Guests needed FS access
+import <TimeServer.camkes>; // Example, if more advanced time services needed
+
+// Component Types
+import "components/VmManager/VmManager.camkes";
+import "components/GuestVmm/GuestVmm.camkes";
+// System components (assuming these are standard, adjust path if custom)
+import <Serial.camkes>;
+import <Timer.camkes>;
+
+// Interfaces
+import "interfaces/VmManagement.idl";
+import "interfaces/GuestControl.idl";
+
+assembly {
+    composition {
+        // VM Manager
+        component VmManager vm_mgr;
+
+        // Guest VM Instances
+        component GuestVmm guest0_inst;
+        component GuestVmm guest1_inst;
+
+        // System Components
+        component Timer system_timer0;
+        component Timer system_timer1;
+        component Serial serial_server0; // For guest0 debug/console
+        component Serial serial_server1; // For guest1 debug/console
+        // component Serial serial_server_mgr; // Optional: if VmManager also needs its own serial port
+
+        // Connections: VmManager to GuestVmm instances
+        connection seL4RPCCall control_conn0(from vm_mgr.control_slot0, to guest0_inst.guest_control_iface);
+        connection seL4RPCCall control_conn1(from vm_mgr.control_slot1, to guest1_inst.guest_control_iface);
+
+        // Connections: GuestVmm instances to their respective system components
+        // Guest 0
+        connection seL4GlobalTimer system_timer_conn0(from guest0_inst.system_timer, to system_timer0.timer);
+        connection seL4Serial serial_port_conn0(from guest0_inst.serial_port, to serial_server0.serial);
+        // TODO: Connect guest0_inst.passthrough_nic_irq_event to an actual physical IRQ source (e.g., seL4HardwareInterrupt)
+        // TODO: Connect guest0_inst.passthrough_gpu_irq_event to an actual physical IRQ source
+
+        // Guest 1
+        connection seL4GlobalTimer system_timer_conn1(from guest1_inst.system_timer, to system_timer1.timer);
+        connection seL4Serial serial_port_conn1(from guest1_inst.serial_port, to serial_server1.serial);
+        // TODO: Connect guest1_inst.passthrough_nic_irq_event (if guest1 uses a NIC)
+        // TODO: Connect guest1_inst.passthrough_gpu_irq_event (if guest1 uses a GPU)
+
+        // TODO: Dataport connections for physical memory (e.g., PCI BARs for passthrough)
+        // These are highly platform and CapDL specific. Example for one BAR for guest0_inst NIC:
+        // connection seL4SharedDataWithCaps nic_bar0_mem_conn_g0(from guest0_inst.passthrough_nic_bar0_mem, to some_capdl_defined_frame_for_nic0_bar0);
+        // Similar connections would be needed for all BARs of all passthrough devices for both guests,
+        // ensuring physical addresses and capabilities are correctly assigned and non-overlapping if devices are distinct.
+    }
+
+    configuration {
+        // VmManager configuration (if any specific attributes were needed)
+        // vm_mgr.some_attribute = "value";
+
+        // Guest 0 Instance Configuration (Example: Linux Guest)
+        guest0_inst.linux_guest_vcpu_id = 0; // Base VCPU ID for this guest
+        guest0_inst.linux_guest_num_vcpus = 1;
+        guest0_inst.guest_ram_size = "0x20000000"; // 512MB
+        guest0_inst.guest_ram_paddr_base = "0xA0000000"; // Example physical base address for guest0 RAM
+        guest0_inst.kernel_image_name = "linux_kernel_for_guest0";
+        guest0_inst.initrd_image_name = "initrd_for_guest0";
+        guest0_inst.is_windows_guest = "false";
+        // VirtIO Console for Guest 0
+        guest0_inst.virtio_con_mmio_paddr = "0xDF000000"; // Example MMIO address
+        guest0_inst.virtio_con_mmio_size = "0x1000";
+        guest0_inst.virtio_con_irq = "33"; // Example IRQ number
+        // VirtIO Block for Guest 0 (optional, if it needs a disk beyond initrd)
+        guest0_inst.virtio_blk_mmio_paddr = "0xDF001000";
+        guest0_inst.virtio_blk_mmio_size = "0x1000";
+        guest0_inst.virtio_blk_irq = "34";
+        guest0_inst.windows_disk_image_name = "linux_disk_for_guest0"; // If using a block device
+        guest0_inst.windows_disk_image_size_config = "0x10000000"; // 256MB example
+        // ELF segment for Linux kernel for Guest 0
+        guest0_inst.linux_kernel_image_elf_segment = "linux_kernel_for_guest0";
+        // ELF segment for InitRD for Guest 0
+        guest0_inst.linux_initrd_image_elf_segment = "initrd_for_guest0";
+        // ELF segment for a data disk for Guest 0 (if any)
+        guest0_inst.windows_disk_image_dataport_elf_segment = "linux_disk_for_guest0"; // Using the same name for consistency
+        // GPU Passthrough for Guest 0 (example, if guest0 gets a GPU)
+        guest0_inst.passthrough_gpu_vid = "0x10DE"; // NVIDIA example VID
+        guest0_inst.passthrough_gpu_did = "0x1EB8"; // Example DID
+        guest0_inst.passthrough_gpu_bar0_size_config = "0x1000000"; // BAR0 size
+        guest0_inst.passthrough_gpu_bar1_size_config = "0x10000000"; // BAR1 size (VRAM)
+        guest0_inst.passthrough_gpu_bar3_size_config = "0x1000000"; // BAR3 size
+        guest0_inst.passthrough_gpu_assigned_irq = "16"; // Or other PCI IRQ
+        guest0_inst.gpu_vbios_image_elf_segment = "vbios_for_guest0_gpu";
+
+
+        // Guest 1 Instance Configuration (Example: Windows Guest)
+        guest1_inst.linux_guest_vcpu_id = 0; // Base VCPU ID for this guest (can be same as guest0 if VMM handles internal VCPU IDs appropriately)
+        guest1_inst.linux_guest_num_vcpus = 2;
+        guest1_inst.guest_ram_size = "0x40000000"; // 1GB
+        guest1_inst.guest_ram_paddr_base = "0xC0000000"; // Example physical base address for guest1 RAM (must not overlap with guest0)
+        guest1_inst.kernel_image_name = ""; // Windows boots from disk
+        guest1_inst.initrd_image_name = "";
+        guest1_inst.is_windows_guest = "true";
+        // VirtIO Console for Guest 1
+        guest1_inst.virtio_con_mmio_paddr = "0xDF002000"; // Different MMIO address from guest0
+        guest1_inst.virtio_con_mmio_size = "0x1000";
+        guest1_inst.virtio_con_irq = "35"; // Different IRQ
+        // VirtIO Block for Guest 1 (Windows boot disk)
+        guest1_inst.virtio_blk_mmio_paddr = "0xDF003000";
+        guest1_inst.virtio_blk_mmio_size = "0x1000";
+        guest1_inst.virtio_blk_irq = "36";
+        guest1_inst.windows_disk_image_name = "windows_disk_for_guest1";
+        guest1_inst.windows_disk_image_size_config = "0x800000000"; // 32GB example for Windows disk
+        // ELF segment for Windows disk image for Guest 1
+        guest1_inst.windows_disk_image_dataport_elf_segment = "windows_disk_for_guest1";
+        // No kernel/initrd ELF segments needed if booting from VirtIO disk.
+        // No GPU passthrough for guest1 in this example, attributes would be empty or zero.
+        guest1_inst.passthrough_gpu_vid = "0x0";
+        guest1_inst.passthrough_gpu_did = "0x0";
+
+        // TODO: Configure dataports for memory regions (PCI BARs) for passthrough devices.
+        // Example: guest0_inst.passthrough_nic_bar0_mem_paddr = "0xE0000000"; // Physical address of NIC BAR0
+        //          guest0_inst.passthrough_nic_bar0_mem_size  = "0x20000";   // Size of NIC BAR0
+        // These configurations are highly platform-specific and involve CapDL setup.
+        // Ensure non-overlapping physical regions if devices are distinct and mapped to different guests.
+    }
+}

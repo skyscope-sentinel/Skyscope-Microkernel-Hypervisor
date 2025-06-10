@@ -1,14 +1,24 @@
 /*
- * LinuxVMM.camkes
- * CAmkES component definition for a Linux Virtual Machine Monitor
+ * GuestVmm.camkes
+ * CAmkES component definition for a generic Guest Virtual Machine Monitor
  */
 
 import <std_connector.camkes>; // For seL4Serial, Timer etc.
 // We might need specific VMM connectors or interfaces later
 // import <sel4vm/sel4vm.camkes>; // If sel4vm provides standard interfaces
 
-component LinuxVMM {
+// Define the GuestControl interface
+interface GuestControl {
+    int configure_and_init(in String profile_name, in String config_data);
+    int start_guest();
+    int stop_guest();
+    int force_stop_guest();
+    // Add other control methods as needed, e.g., pause, resume, get_status
+}
+
+component GuestVmm {
     control; // Indicates an active component with a thread
+    provides GuestControl guest_control_iface;
 
     // --- Configuration ---
     // These values are examples and would typically be set by the application assembler

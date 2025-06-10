@@ -1,0 +1,31 @@
+## @file
+#  PqUefiLoader
+#
+#  Copyright (c) 2023, Pq Lang. All rights reserved.<BR>
+#
+#  SPDX-License-Identifier: BSD-2-Clause-Patent
+#
+##
+
+[Defines]
+  INF_VERSION                    = 0x00010005
+  BASE_NAME                      = PqUefiLoader
+  FILE_GUID                      = AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE  # Replace with a unique GUID
+  MODULE_TYPE                    = UEFI_APPLICATION
+  VERSION_STRING                 = 1.0
+  ENTRY_POINT                    = UefiMain
+
+[Sources]
+  PqUefiLoader.c
+
+[Packages]
+  MdePkg/MdePkg.dec
+  MdeModulePkg/MdeModulePkg.dec
+
+[LibraryClasses]
+  UefiApplicationEntryPoint
+  UefiLib
+  PrintLib
+
+[UserExtensions.TianoCore."ExtraFiles"]
+  PqUefiLoaderExtra.uni
